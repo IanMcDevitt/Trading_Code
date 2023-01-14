@@ -1,0 +1,267 @@
+#include <algorithm>
+#include <iostream>
+#include <numeric>
+#include <vector>
+#include <map>
+#include <mutex>
+#include <thread>
+
+// Use an external library for singular value decomposition (SVD)
+#include "svd.h"
+
+// Constants for the number of principal components to use, the minimum absolute
+// loading on a principal component to consider a stock, and the maximum allowed
+// implementation shortfall
+const int NUM_PRINCIPAL_COMPONENTS = 2;
+const double MIN_LOADING = 0.5;
+const double MAX_IMPLEMENTATION_SHORTFALL = 0.01;
+
+// A struct to represent a pair of stocks
+struct StockPair {
+  std::string stock1;
+  std::string stock2;
+};
+
+// A struct to represent the real-time data of a stock
+struct StockData {
+  double price;
+  double volume;
+  double volatility;
+};
+
+// A struct to represent the calculated mean, standard deviation, volume, and
+// volatility of a stock
+struct StockStatistics {
+  double mean;
+  double stddev;
+  double volume;
+  double volatility;
+};
+
+// A struct to represent a trade between two stocks
+struct StockTrade {
+  std::string stock1;
+  std::string stock2;
+  int position1;
+  int position2;
+  double implementation_shortfall;
+};
+
+// A class to keep track of the real-time data, statistics, and trades of a
+// stock
+class Stock {
+    public:
+    Stock(const std::string& name) : name_(name) {}
+
+    const std::string& name() const { return name_; }
+    bool in_range() const { return in_range_; }
+    const StockData& data() const { return data_; }
+    const StockStatistics& stats() const { return stats_; }
+    const StockTrade& trade() const { return trade_; }
+
+//   void UpdateData(const StockData& data) {
+//     std::lock_guard<std::mutex> lock(mutex_);
+//     data_ = data;
+//   }
+
+    void UpdateData(const StockData& data) {
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+            if (lock.try_lock()) {
+                data_ = data;
+                break;
+            } else {
+                // Mutex not available, wait for a short interval and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+//   void UpdateStatistics(const StockStatistics& stats) {
+//     std::lock_guard<std::mutex> lock(mutex_);
+//     stats_ = stats;
+//   }
+    void UpdateStatistics(const StockStatistics& stats) {
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+            if (lock.try_lock()) {
+                stats_ = stats;
+                break;
+            } else {
+                // Mutex not available, wait for a short interval and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+//   void UpdateTrade(const Stock Trade& trade) {
+//     std::lock_guard<std::mutex> lock(mutex_);
+//     trade_ = trade;
+//   }
+
+    void UpdateTrade(const StockTrade& trade) {
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+            if (lock.try_lock()) {
+                trade_ = trade;
+                break;
+            } else {
+                // Mutex not available, wait for a short interval and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+    void UpdateRange(bool in_range) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        in_range_ = in_range;
+    }
+
+    private:
+        std::string name_;
+        bool in_range_;
+        StockData data_;
+        StockStatistics stats_;
+        StockTrade trade_;
+        std::mutex mutex_;
+};
+
+int main() {
+  // Read in the stock prices data
+  std::vector<std::vector<double>> prices;
+  std::vector<std::string> stock_names;
+  // ...
+
+  // Standardize the data
+  for (auto& stock_prices : prices) {
+    double mean = std::accumulate(stock_prices.begin(), stock_prices.end(), 0.0) / stock_prices.size();
+    double stddev = std::sqrt(std::accumulate(stock_prices.begin(), stock_prices.end(), 0.0, [&](double acc, double x) { return acc + (x - mean) * (x - mean); }) / stock_prices.size());
+    for (auto& price : stock_prices) {
+      price = (price - mean) / stddev;
+    }
+  }
+
+  // Use SVD to decompose the data into its principal components
+  std::vector<std::vector<double>> principal_components = svd(prices);
+
+  // Select the pairs of stocks to trade
+  std::vector<StockPair> pairs;
+  for (int i = 0; i < NUM_PRINCIPAL_COMPONENTS; i++) {
+    // Find the stocks with the highest absolute loading on the current principal component
+    std::pair<std::string, double> stock1;
+    std::pair<std::string, double> stock2;
+    for (int j = 0; j < principal_components[i].size(); j++) {
+      if (std::abs(principal_components[i][j]) > MIN_LOADING) {
+        if (!stock1.first.empty()) {
+          stock2 = { stock_names[j], principal_components[i][j] };
+          break;
+        } else {
+          stock1 = { stock_names[j], principal_components[i][j] };
+        }
+      }
+    }
+
+    // Add the pair to the list of pairs to trade
+    pairs.emplace_back(StockPair{ stock1.first, stock2.first });
+  }
+
+  // Set up a map of stocks and a vector of threads for risk management
+  std::map<std::string, Stock> stocks;
+  std::vector<std::thread> threads;
+
+  // Start a thread for each pair
+  for (const auto& pair : pairs) {
+    // Start a new thread for risk management
+    threads.emplace_back([&] {
+      // Loop until the program is stopped
+      while (true) {
+        // Get the data for both stocks
+        StockData data1 = stocks[pair.stock1].data();
+        StockData data2 = stocks[pair.stock2].data();
+
+        // Calculate the spread and the z-score of the spread
+        double spread = data1.price - data2.price;
+        double z_score = spread / std::sqrt(data1.volatility * data1.volatility + data2.volatility * data2.volatility - 2 * data1.volatility * data2.volatility * data1.correlation);
+
+        // Check if the spread is in the range to trade
+        bool in_range = std::abs(z_score) <= 2.0;
+        stocks[pair.stock1].UpdateRange(in_range);
+        stocks[pair.stock2].UpdateRange(in_range);
+
+        // Update the positions based on the spread
+        if (in_range) {
+          // Calculate the number of units to trade
+          int units = std::max(1, (int)(1.0 / std::abs(z_score) / MAX_IMPLEMENTATION_SHORTFALL));
+
+          // Calculate the new positions
+          int position1 = -units;
+          int position2 = units;
+
+          // Calculate the implementation shortfall
+          double implementation_shortfall = std::abs(spread - (position1 * data1.price + position2 * data2.price));
+
+          // Update the trade for both stocks
+          stocks[pair.stock1].UpdateTrade(StockTrade{ pair.stock1, pair.stock2, position1, position2, implementation_shortfall });
+          stocks[pair.stock2].UpdateTrade(StockTrade{ pair.stock1, pair.stock2, position1, position2, implementation_shortfall });
+        } else {
+          // Update the trade for both stocks
+          stocks[pair.stock1].UpdateTrade(StockTrade{});
+          stocks[pair.stock2].UpdateTrade(StockTrade{});
+        }
+
+        // Sleep for a while before checking again
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+      }
+    });
+  }
+
+  // Wait for the threads to finish
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  return 0;
+}
+
+// THE CODE BELOW IS AN IMPROVEMENT TO THE LOCKING MECHANISM 
+
+// void UpdateData(const StockData& data) {
+//   while (true) {
+//     std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+//     if (lock.try_lock()) {
+//       data_ = data;
+//       break;
+//     } else {
+//       // Mutex not available, wait for a short interval and retry
+//       std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//     }
+//   }
+// }
+
+// void UpdateStatistics(const StockStatistics& stats) {
+//   while (true) {
+//     std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+//     if (lock.try_lock()) {
+//       stats_ = stats;
+//       break;
+//     } else {
+//       // Mutex not available, wait for a short interval and retry
+//       std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//     }
+//   }
+// }
+
+// void UpdateTrade(const StockTrade& trade) {
+//   while (true) {
+//     std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+//     if (lock.try_lock()) {
+//       trade_ = trade;
+//       break;
+//     } else {
+//       // Mutex not available, wait for a short interval and retry
+//       std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//     }
+//   }
+// }
+
+
